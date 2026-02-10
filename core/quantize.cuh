@@ -1,5 +1,3 @@
-// 2-bit Quantization Header
-
 #pragma once
 
 #include <cuda_runtime.h>
@@ -121,12 +119,49 @@ cudaError_t allocate_quantized_tensor(QuantizedTensor* tensor, int M, int K);
 cudaError_t free_quantized_tensor(QuantizedTensor* tensor);
 
 inline float calculate_avg_bits(int num_2bit, int num_4bit, int group_size, int nnz_outliers, int total) {
-    // 2-bit weights + 4-bit weights + scale overhead + outlier overhead
     float bits_2 = num_2bit * 2.0f;
     float bits_4 = num_4bit * 4.0f;
-    float bits_scale = (num_2bit + num_4bit) / group_size * (4 + 2); // 4-bit scale + 2-bit zero
-    float bits_outlier = nnz_outliers * (16 + 16); // value + position
+    float bits_scale = (num_2bit + num_4bit) / group_size * (4 + 2);
+    float bits_outlier = nnz_outliers * (16 + 16);
     return (bits_2 + bits_4 + bits_scale + bits_outlier) / total;
 }
+
+//Host wrappers for individual kernels (used by Python bindings)
+cudaError_t compute_group_stats(
+    const half* weights, float* group_min, float* group_max,
+    int M, int K, cudaStream_t stream = 0
+);
+
+cudaError_t quantize_weights(
+    const half* weights, const float* group_min, const float* group_max,
+    const uint8_t* group_precision,
+    uint32_t* packed_2bit, uint32_t* packed_4bit,
+    half* scales_1st, int8_t* zeros_1st, int* outlier_mask,
+    int M, int K, cudaStream_t stream = 0
+);
+
+cudaError_t quantize_scales_2nd_order(
+    const half* scales_1st, half* scales_2nd, int8_t* zeros_2nd,
+    uint8_t* scales_1st_quant,
+    int M, int num_groups_1st, cudaStream_t stream = 0
+);
+
+cudaError_t count_outliers(
+    const int* outlier_mask, int* row_counts,
+    int M, int K, cudaStream_t stream = 0
+);
+
+cudaError_t extract_outliers(
+    const half* weights, const int* outlier_mask, const int* row_ptrs,
+    half* values, int* col_indices,
+    int M, int K, cudaStream_t stream = 0
+);
+
+cudaError_t dequantize_weights(
+    const uint32_t* packed_2bit, const uint32_t* packed_4bit,
+    const half* scales_1st, const int8_t* zeros_1st,
+    const uint8_t* group_precision, half* output,
+    int M, int K, cudaStream_t stream = 0
+);
 
 } 

@@ -502,10 +502,158 @@ cudaError_t free_quantized_tensor(QuantizedTensor* tensor) {
     return cudaGetLastError();
 }
 
+
+
+__global__ void dequantize_weights_kernel(
+    const uint32_t* __restrict__ packed_2bit,
+    const uint32_t* __restrict__ packed_4bit,
+    const half* __restrict__ scales_1st,
+    const int8_t* __restrict__ zeros_1st,
+    const uint8_t* __restrict__ group_precision,
+    half* __restrict__ output,
+    int M, int K, int num_groups
+) {
+    int row = blockIdx.y;
+    int group_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (group_idx >= num_groups || row >= M) return;
+
+    int col_start = group_idx * GROUP_SIZE_1ST;
+    int col_end = min(col_start + GROUP_SIZE_1ST, K);
+
+    int scale_idx = row * num_groups + group_idx;
+    float scale = hto_float(scales_1st[scale_idx]);
+    int zero = zeros_1st[scale_idx];
+
+    uint8_t precision = group_precision[group_idx];
+
+    if (precision == 0) {
+        uint32_t packed = packed_2bit[row * num_groups + group_idx];
+        uint8_t vals[16];
+        unpack_2bit(packed, vals);
+
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            if (col_start + i < K) {
+                float w = scale * ((float)vals[i] - zero);
+                output[row * K + col_start + i] = float_to_half(w);
+            }
+        }
+    } else {
+        uint32_t packed = packed_4bit[row * num_groups + group_idx];
+        uint8_t vals[8];
+        unpack_4bit(packed, vals);
+
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            if (col_start + i < K) {
+                float w = scale * ((float)vals[i] - zero);
+                output[row * K + col_start + i] = float_to_half(w);
+            }
+        }
+    }
+}
+
+// Host wrappers for Python bindings
+cudaError_t compute_group_stats(
+    const half* weights, float* group_min, float* group_max,
+    int M, int K, cudaStream_t stream
+) {
+    int num_groups = (K + GROUP_SIZE_1ST - 1) / GROUP_SIZE_1ST;
+    int block_size = 256;
+    int grid_size = (num_groups + block_size - 1) / block_size;
+
+    compute_group_stats_kernel<<<grid_size, block_size, 0, stream>>>(
+        weights, group_min, group_max, M, K, num_groups
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t quantize_weights(
+    const half* weights, const float* group_min, const float* group_max,
+    const uint8_t* group_precision,
+    uint32_t* packed_2bit, uint32_t* packed_4bit,
+    half* scales_1st, int8_t* zeros_1st, int* outlier_mask,
+    int M, int K, cudaStream_t stream
+) {
+    int num_groups = (K + GROUP_SIZE_1ST - 1) / GROUP_SIZE_1ST;
+    dim3 grid((num_groups + 31) / 32, M);
+    dim3 block(32);
+
+    quantize_weights_kernel<<<grid, block, 0, stream>>>(
+        weights, group_min, group_max, group_precision,
+        packed_2bit, packed_4bit, scales_1st, zeros_1st,
+        outlier_mask, M, K, num_groups
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t quantize_scales_2nd_order(
+    const half* scales_1st, half* scales_2nd, int8_t* zeros_2nd,
+    uint8_t* scales_1st_quant,
+    int M, int num_groups_1st, cudaStream_t stream
+) {
+    int total_scales = M * num_groups_1st;
+    int num_groups_2nd = (total_scales + GROUP_SIZE_2ND - 1) / GROUP_SIZE_2ND;
+    int block_size = 256;
+    int grid_size = (num_groups_2nd + block_size - 1) / block_size;
+
+    quantize_scales_2nd_order_kernel<<<grid_size, block_size, 0, stream>>>(
+        scales_1st, scales_2nd, zeros_2nd, scales_1st_quant,
+        M, num_groups_1st, num_groups_2nd
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t count_outliers(
+    const int* outlier_mask, int* row_counts,
+    int M, int K, cudaStream_t stream
+) {
+    int block_size = 256;
+    int grid_size = (M + block_size - 1) / block_size;
+
+    count_outliers_kernel<<<grid_size, block_size, 0, stream>>>(
+        outlier_mask, row_counts, M, K
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t extract_outliers(
+    const half* weights, const int* outlier_mask, const int* row_ptrs,
+    half* values, int* col_indices,
+    int M, int K, cudaStream_t stream
+) {
+    int block_size = 256;
+    int grid_size = (M + block_size - 1) / block_size;
+
+    extract_outliers_kernel<<<grid_size, block_size, 0, stream>>>(
+        weights, outlier_mask, row_ptrs, values, col_indices, M, K
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t dequantize_weights(
+    const uint32_t* packed_2bit, const uint32_t* packed_4bit,
+    const half* scales_1st, const int8_t* zeros_1st,
+    const uint8_t* group_precision, half* output,
+    int M, int K, cudaStream_t stream
+) {
+    int num_groups = (K + GROUP_SIZE_1ST - 1) / GROUP_SIZE_1ST;
+    dim3 grid((num_groups + 31) / 32, M);
+    dim3 block(32);
+
+    dequantize_weights_kernel<<<grid, block, 0, stream>>>(
+        packed_2bit, packed_4bit, scales_1st, zeros_1st,
+        group_precision, output, M, K, num_groups
+    );
+    return cudaGetLastError();
+}
+
 }
 
 // Comprehensive test suite for the quantization implementation
 #ifdef TEST_QUANTIZE
+
 
 #include <vector>
 #include <random>

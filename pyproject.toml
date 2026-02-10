@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memboost"
+version = "0.1.0"
+description = "2-bit quantization for LLM inference"
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+cuda = ["torch"]
