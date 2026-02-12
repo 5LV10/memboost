@@ -24,7 +24,9 @@ namespace memboost {
 
 // Get the absolute value of fp16
 __device__ __forceinline__ half habs(half x) {
-    return __habs(x);
+    unsigned short bits = reinterpret_cast<unsigned short&>(x);
+    bits &= 0x7FFF;
+    return reinterpret_cast<half&>(bits);
 }
 // Convert fp16 to fp32
 __device__ __forceinline__ float hto_float(half x) {
@@ -169,6 +171,12 @@ __global__ void quantize_weights_kernel(
     zeros_1st[scale_idx] = (int8_t)zero;
     
     // Quantize each weight in the group
+    // Outlier threshold: must be > max rounding error for that precision.
+    // 2-bit (4 levels): max rounding error = range / (2*(4-1)) = range/6 ≈ 0.167*range
+    // 4-bit (16 levels): max rounding error = range / (2*(16-1)) = range/30 ≈ 0.033*range
+    float range = gmax - gmin;
+    float outlier_thresh = (precision == 0) ? 0.4f * range : 0.15f * range;
+
     if (precision == 0) {
         // 2-bit quantization
         uint8_t quant_vals[16] = {0};
@@ -182,10 +190,10 @@ __global__ void quantize_weights_kernel(
             q = max(0, min(3, q));
             quant_vals[i] = (uint8_t)q;
             
-            // Check for outliers (dequant error > threshold * range)
+            // Check for outliers (dequant error > threshold)
             float w_dequant = scale * (q - zero);
             float error = fabsf(w - w_dequant);
-            if (error > 0.1f * (gmax - gmin)) {
+            if (error > outlier_thresh) {
                 // Mark as outlier
                 atomicOr(&outlier_mask[row * K + col], 1);
             }
@@ -205,6 +213,13 @@ __global__ void quantize_weights_kernel(
             int q = (int)roundf((w - gmin) / scale);
             q = max(0, min(15, q));
             quant_vals[i] = (uint8_t)q;
+
+            // Check for outliers
+            float w_dequant = scale * (q - zero);
+            float error = fabsf(w - w_dequant);
+            if (error > outlier_thresh) {
+                atomicOr(&outlier_mask[row * K + col], 1);
+            }
         }
         
         packed_4bit[row * num_groups + group_idx] = pack_4bit(quant_vals);

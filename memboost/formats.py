@@ -63,6 +63,49 @@ class QuantizedTensor:
         return (bits_w + bits_scale + bits_outlier) / total
 
     @property
+    def total_bytes(self) -> int:
+        """Exact total memory footprint in bytes across all stored tensors."""
+        return (
+            self.packed_2bit.nbytes
+            + self.packed_4bit.nbytes
+            + self.scales_1st.nbytes
+            + self.zeros_1st.nbytes
+            + self.scales_2nd.nbytes
+            + self.zeros_2nd.nbytes
+            + self.scales_1st_quant.nbytes
+            + self.group_precision.nbytes
+            + self.outlier_values.nbytes
+            + self.outlier_col_indices.nbytes
+            + self.outlier_row_ptrs.nbytes
+        )
+
+    @property
+    def total_mb(self) -> float:
+        """Exact total memory footprint in megabytes."""
+        return self.total_bytes / (1024 * 1024)
+
+    def memory_breakdown(self) -> dict[str, float]:
+        """Return per-component memory usage in MiB for debugging."""
+        components = {
+            "packed_2bit": self.packed_2bit.nbytes,
+            "packed_4bit": self.packed_4bit.nbytes,
+            "scales_1st": self.scales_1st.nbytes,
+            "zeros_1st": self.zeros_1st.nbytes,
+            "scales_2nd": self.scales_2nd.nbytes,
+            "zeros_2nd": self.zeros_2nd.nbytes,
+            "scales_1st_quant": self.scales_1st_quant.nbytes,
+            "group_precision": self.group_precision.nbytes,
+            "outlier_values": self.outlier_values.nbytes,
+            "outlier_col_indices": self.outlier_col_indices.nbytes,
+            "outlier_row_ptrs": self.outlier_row_ptrs.nbytes,
+        }
+        mib = {k: v / (1024 * 1024) for k, v in components.items()}
+        for name, size in sorted(mib.items(), key=lambda x: -x[1]):
+            print(f"  {name:25s} {size:8.3f} MiB")
+        print(f"  {'TOTAL':25s} {sum(mib.values()):8.3f} MiB")
+        return mib
+
+    @property
     def device(self) -> torch.device:
         return self.packed_2bit.device
 
